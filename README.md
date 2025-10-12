@@ -1,10 +1,22 @@
-Single-Cell RNA-Seq Workshop
-Instructors: Arsham & Ariel | McGill Initiative in Computational Medicine
-### Main
-Learn how to analyze single-cell RNA-seq data by solving a medical mystery: why do two patients with the same virus respond so differently when their blood tests look identical?
+## Single-Cell RNA-Seq Workshop
+We are facing a Medical Mystery in this course. two patients get the same virus. David recovers in 5 days. Emily ends up in the ICU. Their standard blood tests look nearly identical. What's different?
+Spoiler: Bulk RNA-seq can't tell us, but single-cell can.
+
 ### What You'll Learn
-Quality control → Doublet removal → Normalization (SCTransform) → PCA/UMAP → Clustering → Cell type annotation → Differential expression
+We'll walk through the complete single-cell analysis pipeline:
+
+* Quality Control: Filter dead cells, empty droplets, and doublets
+* Normalization: Use SCTransform to remove technical noise
+* Dimensionality Reduction: PCA and UMAP to visualize thousands of genes in 2D
+* Clustering: Group similar cells together
+* Cell Type Annotation: Figure out what each cluster actually is (T cells? Monocytes?)
+* Differential Expression: Compare David vs Emily the right way (pseudo-bulk, not cell-level!)
+
 ### Prerequisites
-Install: Seurat, tidyverse, patchwork, scDblFinder
-### Dataset
-~3,000 blood cells (PBMCs) from 10x Genomics, with simulated patient labels
+Basic R knowledge. Install these packages:
+```r
+install.packages(c("Seurat", "tidyverse", "patchwork"))
+BiocManager::install(c("scDblFinder", "SingleR", "celldex"))
+```
+### Questions or concerns? 
+Open an issue and we'll help you out.Retry

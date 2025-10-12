@@ -1,0 +1,507 @@
+---
+title: "Single-Cell RNA-Seq Workshop"
+author: "Arsham & Ariel"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, 
+                      fig.width = 10, fig.height = 7)
+```
+
+Today we are trying to solving a medical mystery. Two people get the same virus, but one barely gets sick while the other ends up in the hospital. Standard blood tests? Pretty much the same. So what's really going on inside their immune cells?
+
+That's what we're here to figure out. And honestly, this is where single-cell RNA-seq becomes really powerful - it lets us see things that were completely invisible before.
+
+#### You need to install the requied packages first
+
+If you haven't installed these packages yet, uncomment and run these lines:
+
+```{r installation, eval=FALSE}
+# install.packages("Seurat")
+# install.packages("tidyverse")
+# install.packages("patchwork")
+# 
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# BiocManager::install("scDblFinder")
+# BiocManager::install("SingleR")
+# BiocManager::install("celldex")
+```
+
+```{r load-libraries}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(tidyverse)
+  library(patchwork)
+  library(scDblFinder)
+  library(SingleCellExperiment)
+})
+
+# Set a seed for reproducibility
+set.seed(42)
+```
+
+### Accessing to the data
+
+We're using the classic 10x Genomics PBMC data set for our analysis. About 3,000 cells from a healthy donor's blood. Nice and clean, which makes it perfect for learning.
+
+The real advantage here is that we know what cell types SHOULD be in blood, so we're not guessing in the dark.
+
+```{r load-data}
+# We are using SeuratData (easiest)
+library(SeuratData)
+
+# This downloads the data if you don't have it yet
+
+# InstallData("pbmc3k")  # Uncomment if first time
+
+# Selecting the data name we are interested in (PBMC dataset — 3K cells)
+data("pbmc3k")
+pbmc <- pbmc3k
+pbmc <- UpdateSeuratObject(object = pbmc)
+
+# check if the object is loaded properly
+class(pbmc)
+pbmc
+```
+
+Let's see what we're working with:
+
+```{r explore-data}
+
+# it is important to know the class design of the Seurat
+str(pbmc, 2)
+
+# Look at a tiny piece of the data
+pbmc@assays$RNA@counts[1:5, 1:3]
+```
+
+[If you are familiar with `class "dgCMatrix"`class, this part is not for you.]
+
+Notice how many zeros there are? This is totally normal for single-cell data. Most genes aren't expressed in most cells, plus we have technical dropout where we just miss some transcripts during capture. The data is about 90% zeros typically.
+
+## Part 1: Quality Control
+
+As I showed you on the slides, not every droplet we captured has good and valid data. Some might be empty, some caught dying cells, some accidentally grabbed two cells. We need to filter these out or they'll mess up everything downstream (Go back to slide XX \<Need to have a finalized slides \> and see again yourself).
+
+## Calculate QC metrics
+
+We're going to look at three things:
+
+```{r calculate-qc}
+# Mitochondrial percentage
+
+# In humans, mitochondrial genes start with MT- and in mice they start with mt
+pbmc[["percent.mt"]] <- PercentageFeatureSet(pbmc, pattern = "^MT-") 
+# ^ is a regex syntax used in the pattern, showing the end of the line, making sure somthing like "LVNMT12" won't be deleted.
+
+# Quick look at the metadata
+head(pbmc@meta.data, 10)
+```
+
+## Why mitochondrial percentage matters
+
+There are several reasons, one can be when cells are dying, their outer membrane gets leaky and cytoplasmic RNA starts escaping. But mitochondria have double membranes, so their RNA hangs around longer. Result? If you see high mitochondrial content, that cell was probably already dead or dying when we captured it.
+
+We don't want to analyze dead cells - their gene expression is all messed up and doesn't represent real biology.
+
+```{r visualize-qc-before}
+VlnPlot(pbmc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), 
+        ncol = 3, pt.size = 0.1)
+```
+
+Let's also look at how these metrics relate to each other:
+
+```{r qc-scatter}
+plot1 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+```
+
+## Setting thresholds
+
+[!NOTE] there's NO magic number that works for every dataset. You need to look at YOUR data and decide where to draw the lines.
+
+For PBMCs, reasonable starting points are usually: - At least 200 genes detected (otherwise probably empty) - Less than 5,000 genes (more than that might be doublets) - Mitochondrial content under 15% (higher suggests dying cells)
+
+Please again look at your distributions above and adjust if needed. [Feel free to set random filtration number, you can always start again by loading the new dataset from cell #3].
+
+```{r apply-qc-filters}
+# Check how many cells do we have prior filtering
+
+ncol(pbmc) # before filtration
+
+# Apply filters
+pbmc <- subset(pbmc, subset = nFeature_RNA > 200 & nFeature_RNA < 5000 & percent.mt < 15)
+
+ncol(pbmc) # after filtration
+```
+
+Now we are using violin plots to see the distributions after filtering
+
+```{r qc-after}
+# Check the distributions after filtering
+VlnPlot(pbmc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), 
+        ncol = 3, pt.size = 0.1)
+```
+
+You can see it becames much cleaner! Those extreme outliers are gone and we are ready to go with the new section.
+
+## Part 2: Doublet Detection
+
+Sometimes (most of the time like 5-8% of the time), a droplet captures two cells instead of one. These "doublets" are a problem because they look like weird intermediate cell types that don't actually exist.
+
+We're going to use computational detection to find and remove them.
+
+```{r doublet-detection}
+# Convert to SingleCellExperiment format (scDblFinder needs this)
+sce <- as.SingleCellExperiment(pbmc)
+
+# Run doublet detection - this simulates what doublets should look like
+# and scores each cell based on how similar it is to those simulations
+sce <- scDblFinder(sce)
+```
+
+now lets check how many doublets we found using R's native table function
+```{r}
+# How many doublets did we find?
+table(sce$scDblFinder.class)
+```
+
+```{r visualize-doublets}
+# Add the results back to our Seurat object
+pbmc$doublet_scores <- sce$scDblFinder.score
+pbmc$doublet_class <- sce$scDblFinder.class
+
+# Look at the score distribution
+VlnPlot(pbmc, features = "doublet_scores", pt.size = 0.1)
+```
+
+```{r remove-doublets}
+# Keep only the singlets
+pbmc <- subset(pbmc, subset = doublet_class == "singlet")
+cat("Cells remaining after doublet removal:", ncol(pbmc), "\n")
+```
+
+## Part 3: Normalization
+
+Different cells got sequenced to different depths just due to technical randomness. Some cells might have 2,000 total transcripts detected, others might have 20,000. We need to account for this.
+
+We're using SCTransform, which is basically the current best practice. It's fancier than just dividing by total counts - it actually models the relationship between sequencing depth and expression for each gene.
+
+```{r normalization, eval=FALSE}
+# This takes a bit longer than other cells
+pbmc <- SCTransform(pbmc, vars.to.regress = "percent.mt", verbose = FALSE)
+```
+
+SCTransform fit a model for each gene, calculated how much each cell deviates from that model (the "residuals"), and those residuals become our normalized values. The nice thing is these residuals account for sequencing depth and stabilize variance across different expression levels.
+
+
+
+```{r}
+
+# now lets check the assay slot again
+str(pbmc@assays, 2)
+
+
+str(pbmc@assays$SCT, 2)
+# Look at the different slots
+rowSums(pbmc@assays$SCT$counts) |> head()
+rowSums(pbmc@assays$SCT$data) |> head()
+rowSums(pbmc@assays$SCT$scale.data) |> head()
+```
+
+
+Quick note on the different slots in a Seurat assay:
+- @counts contains the raw UMI counts (non-normalized, non-log-transformed). These are the original integer counts from sequencing.
+- @scale.data contains the scaled residuals (mean-centered and scaled to unit variance) used specifically for PCA and dimensionality reduction. These values can be negative and are standardized.
+- @data contains the normalized expression values (log-normalized) which are more appropriate for comparing distributions and visualization.
+
+```{r}
+
+# now time to plot the difference
+# Create histograms comparing raw counts vs normalized data
+par(mfrow = c(1, 2))
+
+# Histogram of raw counts (log-transformed for visualization)
+hist(log10(rowSums(pbmc@assays$RNA@counts) + 1), breaks = 50,
+     main = "Non-Normalized Data",
+     xlab = "Log10(Total Counts per Cell + 1)",
+     col = "lightblue",
+     border = "white")
+
+# Histogram of normalized data
+hist(rowSums(pbmc@assays$SCT@data), breaks = 50,
+     main = "Normalized Data (SCT)",
+     xlab = "Sum of Normalized Expression per Cell",
+     col = "lightcoral",
+     border = "white")
+
+# Reset plotting parameters
+par(mfrow = c(1, 1))
+
+```
+
+## Part 4: Dimensionality Reduction
+
+We have like 20,000 genes per cell. That's too many dimensions to work with directly - the computer would struggle and we definitely can't visualize it. So we use PCA to compress it down to the main patterns.
+
+```{r run-pca, eval=FALSE}
+pbmc <- RunPCA(pbmc, npcs = 50, verbose = FALSE)
+
+# What are the top genes driving PC1?
+print(pbmc[["pca"]], dims = 1:2, nfeatures = 5)
+```
+
+```{r visualize-pca}
+DimPlot(pbmc, reduction = "pca")
+```
+
+### How many PCs should we use?
+
+Look at the elbow plot - where does it flatten out?
+
+```{r elbow-plot}
+ElbowPlot(pbmc, ndims = 50) + geom_vline(xintercept = 20) # select the x amount you need to used
+```
+
+Based on this, using 20 PCs seems reasonable. The first 20 capture most of the variation, and after that it's mostly noise.
+
+## Part 5: Clustering
+
+Now we group cells that have similar expression patterns. We're using a graph-based approach - basically, we connect each cell to its nearest neighbors, then use an algorithm to find communities in that network.
+
+```{r clustering}
+pbmc <- FindNeighbors(pbmc, dims = 1:20)
+pbmc <- FindClusters(pbmc, resolution = 0.5)
+
+# How many clusters?
+table(Idents(pbmc))
+```
+
+The resolution parameter controls how granular the clustering is. Higher numbers = more clusters. 0.5 is a decent starting point for PBMCs, but there's no single "correct" answer - it depends on your biological question.
+
+## Part 6: UMAP Visualization
+
+UMAP takes our 30-dimensional PCA space and squishes it down to 2D so we can actually look at it. Important: this is JUST for visualization. The clustering we just did was in the 30D PCA space, not on this UMAP.
+
+```{r run-umap}
+pbmc <- RunUMAP(pbmc, dims = 1:30)
+```
+
+Now we can use the UMAP coordinates to plot the cells on a 2D scatterplot
+
+```{r plot-umap}
+DimPlot(pbmc, reduction = "umap", label = TRUE)
+```
+
+We can see distinct clusters, which is what we want. Let's also check if any of our clusters are driven by technical stuff rather than biology:
+
+```{r umap-qc-check}
+FeaturePlot(pbmc, features = c("nFeature_RNA", "percent.mt"))
+```
+
+If you saw one cluster lit up with high mitochondrial percentage or weird gene counts, that would be a red flag. But these look fine - the technical metrics are pretty evenly distributed.
+
+## Part 7: Cell Type Annotation
+
+## Find marker genes
+
+First, let's find genes that distinguish each cluster:
+
+```{r find-markers}
+pbmc.markers <- FindAllMarkers(pbmc, 
+                               only.pos = TRUE,
+                               min.pct = 0.25,
+                               logfc.threshold = 0.25,
+                               verbose = FALSE)
+
+# Top markers per cluster
+top_markers <- pbmc.markers |>
+  group_by(cluster)  |>
+  slice_max(n = 5, order_by = avg_log2FC)
+
+print(top_markers)
+```
+
+Quick note: these p-values are inflated because we used the same data to define clusters AND find markers. That's okay for annotation purposes, but if you're doing formal hypothesis testing, you need a different approach (pseudo-bulk, which we'll get to).
+
+## Match to known cell types
+
+For blood cells, we have well-established marker genes:
+
+```{r check-canonical-markers}
+# These are from the literature and marker databases
+markers_to_check <- c(
+  "CD14", "LYZ", # CD14+ Monocytes
+  "FCGR3A", "MS4A7", # CD16+ Monocytes  
+  "CD3D", "IL7R", # T cells
+  "CD8A", # CD8+ T cells
+  "GNLY", "NKG7", # NK cells
+  "MS4A1", "CD79A", # B cells
+  "FCER1A", "CST3", # Dendritic cells
+  "PPBP" # Platelets
+)
+
+DotPlot(pbmc, features = markers_to_check) + 
+  RotatedAxis()
+```
+
+```{r feature-plots}
+FeaturePlot(pbmc, features = c("CD14", "CD3D", "CD8A", "MS4A1", 
+                                "FCGR3A", "GNLY"), ncol = 3)
+```
+
+Based on these marker patterns, here's what the clusters look like:
+
+```{r annotate-clusters}
+new.cluster.ids <- c("CD14+ Mono", "CD4+ T", "CD8+ T", "B", 
+                     "CD14+ Mono", "NK", "CD16+ Mono", 
+                     "CD4+ T", "DC", "Platelet")
+
+names(new.cluster.ids) <- levels(pbmc)
+pbmc <- RenameIdents(pbmc, new.cluster.ids)
+pbmc$cell_type <- Idents(pbmc)
+```
+
+```{r plot-annotated}
+DimPlot(pbmc, reduction = "umap", label = TRUE, repel = TRUE) +
+  ggtitle("Annotated PBMC Cell Types")
+```
+
+```{r cell-type-table}
+table(pbmc$cell_type)
+```
+
+These proportions look reasonable for healthy blood.
+
+# Part 8: Creating Our David and Emily Story
+
+For teaching purposes, let's simulate having two patients. In a real experiment, you'd have actual patient IDs here.
+
+```{r assign-patients}
+# Random assignment to two patients
+pbmc$patient <- sample(c("David", "Emily"), size = ncol(pbmc), replace = TRUE)
+
+table(pbmc$patient)
+```
+
+```{r plot-by-patient}
+DimPlot(pbmc, reduction = "umap", group.by = "patient", split.by = "patient")
+```
+
+Let's see if there are any differences in cell type composition:
+
+```{r composition-by-patient}
+# Cell counts
+composition <- table(pbmc$cell_type, pbmc$patient)
+print(composition)
+
+# As percentages
+prop.table(composition, margin = 2) * 100
+```
+
+### Part 9: Differential Expression
+
+Now we want to compare gene expression between David and Emily. There are two ways to do this, and one is MUCH better than the other.
+
+The proper approach is to aggregate all cells of each type per patient, then treat patients as replicates. This respects the experimental design - patients are our biological replicates, not individual cells.
+
+In our simulated data, we only have one David and one Emily, so we can't actually calculate meaningful p-values. In a real experiment, you'd have multiple patients per group.
+
+Let's look at CD14+ Monocytes as an example:
+
+```{r pseudobulk-prep}
+# Subset to one cell type
+mono <- subset(pbmc, subset = cell_type == "CD14+ Mono")
+
+cat("Total cells:", ncol(mono), "\n")
+cat("David's cells:", sum(mono$patient == "David"), "\n")
+cat("Emily's cells:", sum(mono$patient == "Emily"), "\n")
+```
+
+```{r aggregate-counts}
+# Aggregate counts by patient
+Idents(mono) <- mono$patient
+bulk_counts <- AggregateExpression(mono, 
+                                    assays = "RNA",
+                                    slot = "counts",
+                                    group.by = "patient")
+
+bulk_counts$RNA[1:10, ]
+```
+
+In a real analysis with proper replicates, you'd now use DESeq2:
+
+```{r pseudobulk-approach, eval=FALSE}
+# This is what you'd do with real replicates:
+# library(DESeq2)
+# 
+# coldata <- data.frame(
+#   condition = c(rep("David", 3), rep("Emily", 3)),
+#   row.names = colnames(bulk_counts$RNA)
+# )
+# 
+# dds <- DESeqDataSetFromMatrix(countData = bulk_counts$RNA,
+#                                colData = coldata,
+#                                design = ~ condition)
+# dds <- DESeq(dds)
+# results <- results(dds)
+```
+
+### The problematic way: Cell-level testing
+
+Some people test each cell individually. The problem? Cells from the same patient aren't independent observations. This leads to absurdly low p-values that don't mean anything.
+
+We'll show this approach so you understand why it's wrong:
+
+```{r cell-level-de}
+# Comparing at the cell level (just for demonstration)
+Idents(mono) <- mono$patient
+
+de_genes <- FindMarkers(mono, 
+                        ident.1 = "Emily", 
+                        ident.2 = "David",
+                        min.pct = 0.1,
+                        test.use = "wilcox")
+
+head(de_genes, 20)
+```
+
+See those tiny p-values? They're not trustworthy. Each cell from Emily is being compared to each cell from David as if they're all independent, which they're not.
+
+This is fine for exploration and visualization, but don't publish these p-values as if they're real.
+
+```{r volcano-plot}
+de_genes$gene <- rownames(de_genes)
+
+ggplot(de_genes, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+  geom_point(alpha = 0.5) +
+  theme_minimal() +
+  labs(title = "DE Genes in CD14+ Monocytes (Emily vs David)",
+       subtitle = "Warning: p-values inflated due to pseudo-replication!",
+       x = "Log2 Fold Change",
+       y = "-log10(adjusted p-value)")
+```
+
+Let's look at some of the top hits:
+
+```{r visualize-de-genes}
+# Top 6 most different genes
+top_genes <- head(rownames(de_genes), 6)
+
+VlnPlot(mono, features = top_genes, split.by = "patient", ncol = 3)
+```
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```

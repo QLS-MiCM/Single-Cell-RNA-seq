@@ -19,4 +19,4 @@ install.packages(c("Seurat", "tidyverse", "patchwork"))
 BiocManager::install(c("scDblFinder", "SingleR", "celldex"))
 ```
 ### Questions or concerns? 
-Open an issue and we'll help you out.Retry
+Open an issue and we'll help you out.

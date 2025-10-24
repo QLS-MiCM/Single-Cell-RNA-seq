@@ -33,6 +33,7 @@ If you haven't installed these packages yet, uncomment and run these lines:
 # BiocManager::install("scDblFinder")
 # BiocManager::install("SingleR")
 # BiocManager::install("celldex")
+
 ```
 
 ```{r load-libraries}
@@ -89,6 +90,15 @@ Notice how many zeros there are? This is totally normal for single-cell data. Mo
 
 ## Part 1: Quality Control
 
+```{r}
+VlnPlot(pbmc, features = c("nFeature_RNA", "nCount_RNA"), 
+        ncol = 3, pt.size = 0.1)
+```
+
+-   nFeature_RNA: This is the number of unique genes detected in a single cell. If a cell has 500 different genes that were captured, its nFeature_RNA is 500.
+
+-   nCount_RNA: This is the total number of transcripts (or UMIs) detected in a single cell. A cell might have 500 unique genes (nFeature_RNA), but the total count of all transcripts from those genes could be 2,500. In that case, its nCount_RNA is 2,500.
+
 As I showed you on the slides, not every droplet we captured has good and valid data. Some might be empty, some caught dying cells, some accidentally grabbed two cells. We need to filter these out or they'll mess up everything downstream (Go back to slide XX \<Need to have a finalized slides \> and see again yourself).
 
 ## Calculate QC metrics
@@ -112,14 +122,30 @@ There are several reasons, one can be when cells are dying, their outer membrane
 
 We don't want to analyze dead cells - their gene expression is all messed up and doesn't represent real biology.
 
-```{r visualize-qc-before}
+```{r}
 VlnPlot(pbmc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), 
         ncol = 3, pt.size = 0.1)
 ```
+```{r}
+
+p1 <- VlnPlot(pbmc, features = "nFeature_RNA", pt.size = 0.1) + 
+  geom_hline(yintercept = 200, linetype = "dotted", color = "red", size = 0.75) +
+  geom_hline(yintercept = 5000, linetype = "dotted", color = "red", size = 0.75) +
+  ylim(0, NA) # Ensure the 200 line is visible
+
+p3 <- VlnPlot(pbmc, features = "percent.mt", pt.size = 0.1) + 
+  geom_hline(yintercept = 15, linetype = "dotted", color = "red", size = 0.75) +
+  ylim(0, NA) # Ensure the 15 line is visible
+  
+print(p1 | p3)
+```
+
+
+There is no need for filtration, since the data is already clean, but in real life data you will see some extreme outliers here.
 
 Let's also look at how these metrics relate to each other:
 
-```{r qc-scatter}
+```{r}
 plot1 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "percent.mt")
 plot2 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
 plot1 + plot2
@@ -152,7 +178,7 @@ VlnPlot(pbmc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
         ncol = 3, pt.size = 0.1)
 ```
 
-You can see it becames much cleaner! Those extreme outliers are gone and we are ready to go with the new section.
+You can see it became much cleaner! Those extreme outliers are gone and we are ready to go with the new section.
 
 ## Part 2: Doublet Detection
 
@@ -170,6 +196,7 @@ sce <- scDblFinder(sce)
 ```
 
 now lets check how many doublets we found using R's native table function
+
 ```{r}
 # How many doublets did we find?
 table(sce$scDblFinder.class)
@@ -203,8 +230,6 @@ pbmc <- SCTransform(pbmc, vars.to.regress = "percent.mt", verbose = FALSE)
 
 SCTransform fit a model for each gene, calculated how much each cell deviates from that model (the "residuals"), and those residuals become our normalized values. The nice thing is these residuals account for sequencing depth and stabilize variance across different expression levels.
 
-
-
 ```{r}
 
 # now lets check the assay slot again
@@ -218,11 +243,9 @@ rowSums(pbmc@assays$SCT$data) |> head()
 rowSums(pbmc@assays$SCT$scale.data) |> head()
 ```
 
+Quick note on the different slots in a Seurat assay: - @counts contains the raw UMI counts (non-normalized, non-log-transformed). These are the original integer counts from sequencing. - @scale.data contains the scaled residuals (mean-centered and scaled to unit variance) used specifically for PCA and dimensionality reduction. These values can be negative and are standardized. - @data contains the normalized expression values (log-normalized) which are more appropriate for comparing distributions and visualization.
 
-Quick note on the different slots in a Seurat assay:
-- @counts contains the raw UMI counts (non-normalized, non-log-transformed). These are the original integer counts from sequencing.
-- @scale.data contains the scaled residuals (mean-centered and scaled to unit variance) used specifically for PCA and dimensionality reduction. These values can be negative and are standardized.
-- @data contains the normalized expression values (log-normalized) which are more appropriate for comparing distributions and visualization.
+Lets have a before and after comparison of the assay slot
 
 ```{r}
 
@@ -248,6 +271,53 @@ hist(rowSums(pbmc@assays$SCT@data), breaks = 50,
 par(mfrow = c(1, 1))
 
 ```
+Look at how tight that peak is! SCTransform has modeled and removed that technical sequencing-depth effect. By scaling the data, it makes the total amount of 'expression' in each cell comparable.
+
+
+```{r}
+VariableFeaturePlot(pbmc, selection.method = "sct") +
+  labs(title = "Informative Genes Identified by SCTransform")
+
+```
+
+
+
+
+
+```{r}
+
+# Set default assay to "RNA" to plot raw, normalized data
+DefaultAssay(pbmc) <- "RNA"
+
+p_before <- FeatureScatter(pbmc, 
+                           feature1 = "nCount_RNA", 
+                           feature2 = "ACTB", 
+                           # No 'assay' argument needed now
+                           pt.size = 0.5) +
+  labs(title = "Before Normalization (RNA Assay)",
+       x = "Total Counts (Library Size)",
+       y = "Log-Normalized Expression of ACTB") +
+  theme_bw()
+
+# Set default assay to "SCT" to plot normalized data
+DefaultAssay(pbmc) <- "SCT"
+
+p_after <- FeatureScatter(pbmc, 
+                          feature1 = "nCount_RNA", 
+                          feature2 = "ACTB", 
+                          # No 'assay' argument needed now
+                          pt.size = 0.5) +
+  labs(title = "After Normalization (SCT Assay)",
+       x = "Total Counts (Library Size)",
+       y = "SCT-Normalized Expression of ACTB") +
+  theme_bw()
+
+# 3. Combine plots
+p_before + p_after
+
+
+```
+
 
 ## Part 4: Dimensionality Reduction
 
@@ -259,18 +329,31 @@ pbmc <- RunPCA(pbmc, npcs = 50, verbose = FALSE)
 # What are the top genes driving PC1?
 print(pbmc[["pca"]], dims = 1:2, nfeatures = 5)
 ```
+### How many PCs should we use?
+Look at the elbow plot - where does it flatten out?
+```{r}
+ElbowPlot(pbmc, ndims = 50)
+
+```
+```{r}
+p1 <- DimPlot(pbmc, reduction = "pca", dims = c(1, 2)) +
+  labs(title = "PC 1 vs PC 2: Shows major biological structure")
+
+p2 <- DimPlot(pbmc, reduction = "pca", dims = c(49, 50)) +
+  labs(title = "PC 49 vs PC 50: Shows random noise")
+
+# Combine using patchwork (which is already loaded)
+p1
+p2
+```
+
 
 ```{r visualize-pca}
 DimPlot(pbmc, reduction = "pca")
 ```
 
-### How many PCs should we use?
 
-Look at the elbow plot - where does it flatten out?
 
-```{r elbow-plot}
-ElbowPlot(pbmc, ndims = 50) + geom_vline(xintercept = 20) # select the x amount you need to used
-```
 
 Based on this, using 20 PCs seems reasonable. The first 20 capture most of the variation, and after that it's mostly noise.
 
@@ -300,6 +383,8 @@ Now we can use the UMAP coordinates to plot the cells on a 2D scatterplot
 
 ```{r plot-umap}
 DimPlot(pbmc, reduction = "umap", label = TRUE)
+DimPlot(pbmc, reduction = "pca", label = TRUE)
+
 ```
 
 We can see distinct clusters, which is what we want. Let's also check if any of our clusters are driven by technical stuff rather than biology:
@@ -314,25 +399,47 @@ If you saw one cluster lit up with high mitochondrial percentage or weird gene c
 
 ## Find marker genes
 
-First, let's find genes that distinguish each cluster:
 
-```{r find-markers}
-pbmc.markers <- FindAllMarkers(pbmc, 
-                               only.pos = TRUE,
-                               min.pct = 0.25,
-                               logfc.threshold = 0.25,
-                               verbose = FALSE)
+## Part 7.5: Automated Cell Type Annotation
 
-# Top markers per cluster
-top_markers <- pbmc.markers |>
-  group_by(cluster)  |>
-  slice_max(n = 5, order_by = avg_log2FC)
+```{r}
 
-print(top_markers)
+# 1. Load the required libraries (these are in your setup chunk)
+suppressPackageStartupMessages({
+  library(SingleR)
+  library(celldex)
+})
+
+# 2. Get the reference dataset
+# We'll use the Human Primary Cell Atlas (HPCA), a reliable reference.
+ref_data <- HumanPrimaryCellAtlasData()
+
+# 3. Run SingleR
+# We need to convert our Seurat object to a SingleCellExperiment object.
+# SingleR works best on log-normalized counts from the "RNA" assay.
+# This assumes you have run: pbmc <- NormalizeData(pbmc, assay = "RNA")
+# (We did this in the normalization plotting section)
+
+predictions <- SingleR(
+  test = as.SingleCellExperiment(pbmc), 
+  ref = ref_data, 
+  labels = ref_data$label.main,
+  assay.type.test = "logcounts" # Use the log-normalized "RNA" assay
+)
+
+# 4. Add the labels back to our Seurat object
+pbmc$auto.labels <- predictions$labels
+
+# 5. Visualize the automated labels
+DimPlot(pbmc, reduction = "umap", group.by = "auto.labels", label = TRUE, repel = TRUE) +
+  NoLegend() +
+  ggtitle("Automated Cell Types (SingleR)")
+
+
+table(Manual = pbmc$cell_type, Auto = pbmc$auto.labels)
+
 ```
-
-Quick note: these p-values are inflated because we used the same data to define clusters AND find markers. That's okay for annotation purposes, but if you're doing formal hypothesis testing, you need a different approach (pseudo-bulk, which we'll get to).
-
+## 
 ## Match to known cell types
 
 For blood cells, we have well-established marker genes:
